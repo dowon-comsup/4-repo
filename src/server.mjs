@@ -12,7 +12,8 @@ import { z } from 'zod';
 import {
  judgeDirector, formatDirectorResult,
  judgeFamily, formatFamilyResult, FAMILY_RELATIONS, FAMILY_POSITIVE, FAMILY_NEGATIVE,
- judgeNonreg, formatNonregResult, NONREG_NEGATIVE, NONREG_POSITIVE
+ judgeNonreg, formatNonregResult, NONREG_NEGATIVE, NONREG_POSITIVE,
+ analyzeCeoFamily, formatCeoFamilyResult
 } from './judge.mjs';
 
 const cat = arr => arr.map(f => `${f.id}(${f.w}): ${f.label}`).join(' / ');
@@ -114,6 +115,29 @@ function buildServer(){
    const res = judgeNonreg(members);
    return { content: [
     { type:'text', text: formatNonregResult(res) },
+    { type:'text', text: '\n[구조화 결과 JSON]\n' + JSON.stringify(res, null, 2) }
+   ] };
+  }
+ );
+
+ server.registerTool(
+  'analyze_ceo_family',
+  {
+   title: '대표이사 공동대표·친족 분석',
+   description:
+    '법인등기부등본 텍스트에서 대표이사 임기 이력을 추출해 (1) 공동대표이사 체제(겹치는 재임 구간), ' +
+    '(2) 대표이사 변경 이력, (3) 대표이사 간 등기부 주소 동일/유사(동일 건물+호수)에 따른 친족·친족의심 쌍을 분석한다. ' +
+    '주소가 일치하면 친족(동거친족 등 적용제외 검토 대상) 가능성을 환기하나, 등기부 주소만으로는 한계가 있어 ' +
+    '가족관계증명서·주민등록등본 별도 확인이 필요하다. ' +
+    '사용법: 사용자가 올린 등기부등본 PDF를 너(Claude)가 읽어 대표이사·이사장 직위·성명·등록번호 6자리·주소·취임/사임 날짜를 보존한 원문 텍스트로 전달하라.',
+   inputSchema: {
+    registry_text: z.string().min(1).describe('법인등기부등본 원문 텍스트(대표이사·이사장 직위·성명·등록번호 6자리·주소·취임/사임 날짜 포함)')
+   }
+  },
+  async ({ registry_text }) => {
+   const res = analyzeCeoFamily(registry_text);
+   return { content: [
+    { type:'text', text: formatCeoFamilyResult(res) },
     { type:'text', text: '\n[구조화 결과 JSON]\n' + JSON.stringify(res, null, 2) }
    ] };
   }

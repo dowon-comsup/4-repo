@@ -586,3 +586,183 @@ export function formatNonregResult(res){
  L.push(`※ 참고 자료 — 최종 판단은 담당 노무사·관할 근로복지공단. 국민연금·건강보험 미대상.`);
  return L.join('\n');
 }
+
+// =====================================================================
+// 공동대표·친족 분석 — 출처: insurance-tools parseCeoHistory/detectCoCeo/주소유사도
+// (MCP 이식 시 대표이사 이름 정규식을 영문·혼용 허용으로 broaden)
+// =====================================================================
+function parseCeoHistory(text){
+ const ceoRe = /^(?:대표이사|이사장)\s+([가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?)\s+(\d{6})\s*-?\s*\*+\s*(.*)$/;
+ // anyPosRe: 영문명 임원도 차단해 대표이사 블록에 다른 직위 이벤트가 섞이는 것 방지(원본 HTML 대비 개선)
+ const anyPosRe = /^(이사장|대표이사|사내이사|사외이사|감사|이사)\s+[가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?\s+\d{6}/;
+ const dateRe = /(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(취임|중임|퇴임|사임|해임|사망|임기만료|주소변경)/g;
+ const lines = text.split('\n');
+ const blocks = []; let cur = null;
+ lines.forEach(L=>{
+  const m = L.match(ceoRe);
+  if(m){ if(cur)blocks.push(cur); cur={name:m[1].trim(),rrn:m[2],addr:(m[3]||'').trim(),body:''}; return; }
+  if(anyPosRe.test(L)){ if(cur){blocks.push(cur);cur=null;} return; }
+  if(cur){
+   if(/년.*월.*일/.test(L)) cur.body+=L+'\n';
+   else if(L.trim() && !/년.*월.*일/.test(cur.body)) cur.addr+=' '+L.trim();
+  }
+ });
+ if(cur) blocks.push(cur);
+
+ const byPerson = {};
+ blocks.forEach(b=>{
+  const k = b.name+b.rrn;
+  if(!byPerson[k]) byPerson[k]={name:b.name,rrn:b.rrn,addrs:[],events:[]};
+  if(b.addr) byPerson[k].addrs.push(b.addr.trim());
+  let mm; dateRe.lastIndex=0;
+  while((mm=dateRe.exec(b.body))){
+   byPerson[k].events.push({date:`${mm[1]}-${String(mm[2]).padStart(2,'0')}-${String(mm[3]).padStart(2,'0')}`,type:mm[4]});
+  }
+ });
+
+ const TERM = ['사임','퇴임','해임','사망','임기만료'];
+ const periods = [];
+ Object.values(byPerson).forEach(p=>{
+  const seen = new Set();
+  let ev = p.events.filter(e=>{const k=e.date+e.type;if(seen.has(k))return false;seen.add(k);return true;})
+                   .sort((a,b)=>a.date.localeCompare(b.date)||(a.type==='취임'?1:-1));
+  const drop = new Set();
+  for(let i=0;i<ev.length-1;i++){
+   if(TERM.includes(ev[i].type) && ev[i+1].type==='취임' && ev[i].date===ev[i+1].date){ drop.add(i); drop.add(i+1); }
+  }
+  ev = ev.filter((_,i)=>!drop.has(i));
+  let start = null;
+  ev.forEach(e=>{
+   if(e.type==='취임'){ if(!start) start=e.date; }
+   else if(TERM.includes(e.type)){ if(start){ periods.push({name:p.name,rrn:p.rrn,start,end:e.date,endType:e.type,addrs:p.addrs.slice()}); start=null; } }
+  });
+  if(start) periods.push({name:p.name,rrn:p.rrn,start,end:null,endType:'재임중',addrs:p.addrs.slice()});
+ });
+ periods.sort((a,b)=>a.start.localeCompare(b.start)||a.name.localeCompare(b.name));
+ return periods;
+}
+
+function detectCoCeo(periods){
+ if(!periods.length) return {isCoCeo:false,coCeoPeriods:[],coCeoMap:{}};
+ const distinct = [];
+ periods.forEach(p=>{if(!distinct.find(x=>x.name===p.name&&x.rrn===p.rrn))distinct.push({name:p.name,rrn:p.rrn});});
+ if(distinct.length<2) return {isCoCeo:false,coCeoPeriods:[],coCeoMap:{}};
+ const byPerson = {};
+ periods.forEach(p=>{
+  const k = p.name+p.rrn;
+  if(!byPerson[k]) byPerson[k]={name:p.name,rrn:p.rrn,spans:[]};
+  byPerson[k].spans.push({start:p.start,end:p.end||'9999-12-31'});
+ });
+ const persons = Object.values(byPerson);
+ const overlaps = [];
+ for(let i=0;i<persons.length;i++){
+  for(let j=i+1;j<persons.length;j++){
+   const A=persons[i], B=persons[j];
+   A.spans.forEach(sa=>{
+    B.spans.forEach(sb=>{
+     const from = sa.start>sb.start?sa.start:sb.start;
+     const to = sa.end<sb.end?sa.end:sb.end;
+     if(from<to){
+      const toDisplay = to==='9999-12-31'?null:to;
+      overlaps.push({names:[A.name,B.name],rrns:[A.rrn,B.rrn],from,to:toDisplay});
+     }
+    });
+   });
+  }
+ }
+ overlaps.sort((a,b)=>a.from.localeCompare(b.from));
+ return {isCoCeo:overlaps.length>0, coCeoPeriods:overlaps, coCeoMap:{}};
+}
+
+function checkActiveCoCeo(officers){
+ const activeCeos = officers.filter(o=>(o.pos==='대표이사'||o.pos==='이사장')&&o.active);
+ return {isActive:activeCeos.length>=2, count:activeCeos.length, names:activeCeos.map(c=>c.name)};
+}
+
+function normAddr(s){
+ return (s||'').replace(/[\s,()\-.·]/g,'').replace(/광역시|특별시|특별자치시|특별자치도/g,'').toLowerCase();
+}
+function extractAddrSignals(s){
+ const norm = normAddr(s);
+ const hoM = norm.match(/(\d{2,5})호/);
+ const bldgM = norm.match(/[가-힣]{2,}(?:그린파크|아파트|빌라|빌딩|타워|레지던스|오피스텔|푸르지오|자이|아이파크|더샵|롯데캐슬|이편한세상|힐스테이트)/);
+ return {norm,ho:hoM?hoM[1]:null,bldg:bldgM?bldgM[0]:null};
+}
+function bestPairSim(addrsA,addrsB){
+ let pair=['',''], same=false, suspect=false;
+ (addrsA||[]).forEach(a=>(addrsB||[]).forEach(b=>{
+  const sA=extractAddrSignals(a), sB=extractAddrSignals(b);
+  if(sA.norm&&sB.norm&&sA.norm===sB.norm){ same=true; pair=[a,b]; }
+  else if(!same && sA.ho&&sB.ho&&sA.bldg&&sB.bldg && sA.ho===sB.ho && sA.bldg===sB.bldg){ suspect=true; if(!pair[0]||!pair[1]) pair=[a,b]; }
+ }));
+ if(!same && !suspect) pair=[(addrsA||[])[0]||'', (addrsB||[])[0]||''];
+ return {same, suspect, a:pair[0], b:pair[1]};
+}
+
+export function analyzeCeoFamily(registryText){
+ const periods = parseCeoHistory(registryText||'');
+ const officers = parseRegistry(registryText||'');
+ const coCeo = detectCoCeo(periods);
+ const activeCoCeo = checkActiveCoCeo(officers);
+
+ const distinct = [];
+ periods.forEach(p=>{ if(!distinct.find(x=>x.name===p.name&&x.rrn===p.rrn)) distinct.push({name:p.name,rrn:p.rrn}); });
+
+ const persons = {};
+ periods.forEach(p=>{
+  const k = p.name+p.rrn;
+  if(!persons[k]) persons[k]={name:p.name,rrn:p.rrn,addrs:[]};
+  p.addrs.forEach(a=>{ if(a && !persons[k].addrs.includes(a)) persons[k].addrs.push(a); });
+ });
+ const arr = Object.values(persons);
+ const kinRows = [];
+ for(let i=0;i<arr.length;i++) for(let j=i+1;j<arr.length;j++){
+  const r = bestPairSim(arr[i].addrs, arr[j].addrs);
+  if(r.same||r.suspect) kinRows.push({a:arr[i].name,b:arr[j].name,addrA:r.a,addrB:r.b,kind:r.same?'친족':'친족의심'});
+ }
+
+ return {
+  periods: periods.map(p=>({name:p.name,rrn:p.rrn?p.rrn+'-*':'',start:p.start,end:p.end||'현재',endType:p.endType,addr:p.addrs[p.addrs.length-1]||''})),
+  isCoCeo: coCeo.isCoCeo,
+  coCeoPeriods: coCeo.coCeoPeriods.map(o=>({a:o.names[0],b:o.names[1],from:o.from,to:o.to||'현재',current:!o.to})),
+  activeCoCeo,
+  changeCount: distinct.length,
+  changeNames: distinct.map(d=>d.name),
+  kinRows
+ };
+}
+
+export function formatCeoFamilyResult(res){
+ const L = [`■ 대표이사 공동대표·친족 분석`];
+ if(!res.periods.length){ L.push('등기부에서 대표이사 정보를 추출하지 못했습니다.'); return L.join('\n'); }
+ L.push(`\n[대표이사 임기]`);
+ res.periods.forEach(p=>L.push(`- ${p.name} (${p.rrn}) ${p.start} ~ ${p.end} [${p.endType}] 주소: ${p.addr||'-'}`));
+
+ L.push(`\n[공동대표이사]`);
+ if(res.isCoCeo){
+  if(res.activeCoCeo.isActive) L.push(`⚠ 현재 공동대표 ${res.activeCoCeo.count}인 체제: ${res.activeCoCeo.names.join(', ')}`);
+  res.coCeoPeriods.forEach(o=>L.push(`- ${o.a} ↔ ${o.b}: ${o.from} ~ ${o.to} ${o.current?'(현재 공동대표)':'(과거)'}`));
+  L.push(`※ 공동대표는 각각 독립 대표 → 적용제외 개별 판단. 공동대표 간 친족관계도 확인.`);
+ } else {
+  L.push(`해당 없음 (단독 대표 체제)`);
+ }
+
+ L.push(`\n[대표이사 변경] 총 ${res.changeCount}명${res.changeCount>=2?': '+res.changeNames.join(' → '):' (단일 대표)'}`);
+
+ if(res.changeCount>=2){
+  L.push(`\n[친족 판정] 주소 동일 또는 동일 건물+호수 쌍`);
+  if(res.kinRows.length){
+   res.kinRows.forEach(k=>L.push(`- [${k.kind}] ${k.a} ↔ ${k.b}\n    A주소: ${k.addrA}\n    B주소: ${k.addrB}`));
+  } else {
+   L.push(`등기부 주소 동일/유사 쌍 없음 (아래 한계 참조)`);
+  }
+  L.push(
+   `\n⚠ 친족 판정의 한계\n`+
+   `① 등기부등본 주소 완전 일치 여부만 산출 — 도로명·지번·호수·층 표기 차이가 있는 동일 주소는 비친족 처리됨\n`+
+   `② 4촌 이내 친족·직계존비속·배우자는 등기부만으로 확인 불가 → 가족관계증명서·주민등록등본 별도 확인 필수\n`+
+   `③ 친족 해당 시 사업주와 친족관계자로서 산재·고용보험 적용제외 검토 대상 → 본 판정과 별개로 추가 검토\n`+
+   `④ 외국인 임원(한자/영문명)·미등기 임원은 누락될 수 있음`
+  );
+ }
+ return L.join('\n');
+}

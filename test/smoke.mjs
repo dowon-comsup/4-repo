@@ -1,5 +1,5 @@
 // 판정 로직 스모크 테스트 (의존성 불필요): node test/smoke.mjs
-import { judgeDirector, formatDirectorResult, judgeFamily, judgeNonreg } from '../src/judge.mjs';
+import { judgeDirector, formatDirectorResult, judgeFamily, judgeNonreg, analyzeCeoFamily } from '../src/judge.mjs';
 
 const registry = `
 법인등기부등본
@@ -64,5 +64,13 @@ const nr = judgeNonreg([
 const nByName = Object.fromEntries(nr.results.map(r=>[r.name,r]));
 check('비등기-위임D', `순점수 높음 → 취득취소 가능 (고용=${nByName['위임D']?.empJ})`, nByName['위임D']?.empJ==='취득취소 가능');
 check('비등기-근로E', `근로계약+인정우세 → 정상 (고용=${nByName['근로E']?.empJ})`, /정상/.test(nByName['근로E']?.empJ||''));
+
+// ── 공동대표·친족 분석 ──────────────────────────────
+const ceo = analyzeCeoFamily(
+ '대표이사 김대표 600101-*******  서울특별시 강남구 역삼로 212, 706호\n2018년 01월 01일 취임\n' +
+ '대표이사 김배우 650505-*******  서울특별시 강남구 역삼로 212, 706호\n2018년 01월 01일 취임\n'
+);
+check('공동대표', `공동대표 감지(isCoCeo=${ceo.isCoCeo}, 현재 ${ceo.activeCoCeo.count}인)`, ceo.isCoCeo && ceo.activeCoCeo.isActive);
+check('친족판정', `주소 동일 → 친족 (kinRows=${ceo.kinRows.length})`, ceo.kinRows.some(k=>k.kind==='친족'));
 
 console.log('\n검증 종료. exitCode=', process.exitCode||0);
