@@ -8,6 +8,7 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
  judgeDirector, formatDirectorResult,
@@ -150,33 +151,56 @@ const app = express();
 app.use(express.json({ limit: '4mb' }));
 
 // 헬스체크 (Render)
-app.get('/', (_req, res) => res.json({ ok: true, service: 'dowon-insurance-mcp', tool: 'judge_director' }));
+app.get('/', (_req, res) => res.json({ ok: true, service: 'dowon-insurance-mcp', tools: ['judge_director','judge_family','judge_nonreg','analyze_ceo_family'] }));
+
+function checkAuth(req, res){
+ if (!AUTH_TOKEN) return true;
+ const auth = req.headers['authorization'] || '';
+ if (auth !== `Bearer ${AUTH_TOKEN}`){
+  res.status(401).json({ jsonrpc:'2.0', error:{ code:-32001, message:'Unauthorized' }, id:null });
+  return false;
+ }
+ return true;
+}
+
+// 세션ID → transport (stateful Streamable HTTP — claude.ai 웹 호환)
+const transports = {};
 
 app.post('/mcp', async (req, res) => {
- if (AUTH_TOKEN) {
-  const auth = req.headers['authorization'] || '';
-  if (auth !== `Bearer ${AUTH_TOKEN}`) {
-   return res.status(401).json({ jsonrpc:'2.0', error:{ code:-32001, message:'Unauthorized' }, id:null });
-  }
- }
+ if (!checkAuth(req, res)) return;
  try {
-  const server = buildServer();
-  // stateless: 요청마다 새 transport (세션 ID 미사용)
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on('close', () => { transport.close(); server.close(); });
-  await server.connect(transport);
+  const sid = req.headers['mcp-session-id'];
+  let transport;
+  if (sid && transports[sid]) {
+   transport = transports[sid];                       // 기존 세션 재사용
+  } else if (!sid && isInitializeRequest(req.body)) {
+   // 새 세션 초기화
+   transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (newId) => { transports[newId] = transport; }
+   });
+   transport.onclose = () => { if (transport.sessionId) delete transports[transport.sessionId]; };
+   const server = buildServer();
+   await server.connect(transport);
+  } else {
+   return res.status(400).json({ jsonrpc:'2.0', error:{ code:-32000, message:'Bad Request: 유효한 세션 ID가 없습니다' }, id:null });
+  }
   await transport.handleRequest(req, res, req.body);
  } catch (e) {
   console.error('MCP 처리 오류:', e);
-  if (!res.headersSent) {
-   res.status(500).json({ jsonrpc:'2.0', error:{ code:-32603, message:'Internal server error' }, id:null });
-  }
+  if (!res.headersSent) res.status(500).json({ jsonrpc:'2.0', error:{ code:-32603, message:'Internal server error' }, id:null });
  }
 });
 
-// stateless 모드에서는 GET/DELETE /mcp(SSE 스트림·세션 종료)를 사용하지 않음
-app.get('/mcp', (_req, res) => res.status(405).json({ jsonrpc:'2.0', error:{ code:-32000, message:'Method not allowed (stateless)' }, id:null }));
-app.delete('/mcp', (_req, res) => res.status(405).json({ jsonrpc:'2.0', error:{ code:-32000, message:'Method not allowed (stateless)' }, id:null }));
+// GET=SSE 스트림 / DELETE=세션 종료 (세션ID 필요)
+async function handleSession(req, res){
+ if (!checkAuth(req, res)) return;
+ const sid = req.headers['mcp-session-id'];
+ if (!sid || !transports[sid]) return res.status(400).send('유효한 세션 ID가 없습니다');
+ await transports[sid].handleRequest(req, res);
+}
+app.get('/mcp', handleSession);
+app.delete('/mcp', handleSession);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`dowon-insurance-mcp listening on :${PORT} (POST /mcp)`));
+app.listen(PORT, () => console.log(`dowon-insurance-mcp listening on :${PORT} (Streamable HTTP /mcp, stateful)`));
