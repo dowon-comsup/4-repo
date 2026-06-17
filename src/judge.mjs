@@ -436,3 +436,153 @@ export function formatDirectorResult(res){
  lines.push(`※ 국민연금·건강보험은 본 도구에서 다루지 않습니다.`);
  return lines.join('\n');
 }
+
+// =====================================================================
+// 가족종사자 판정 (점수 체크리스트) — 출처: insurance-tools 가족종사자 탭
+// =====================================================================
+export const FAMILY_RELATIONS = ['배우자','직계존속 (부모·조부모 등)','직계비속 (자녀·손자녀 등)','형제자매','기타 친족 (4촌 이내)'];
+export const FAMILY_POSITIVE = [ // 근로자성 인정요소 (+)
+ { id:'contract',    w:2, label:'서면 근로계약서 작성·보관' },
+ { id:'transfer',    w:2, label:'타 근로자와 동일 조건 계좌이체 급여 지급' },
+ { id:'payslip',     w:1, label:'임금명세서 정기 발급 (근기법 §48②)' },
+ { id:'attendance',  w:2, label:'출근부·근태기록·업무지시 문서화' },
+ { id:'benefit',     w:1, label:'타 근로자와 동일한 연차·퇴직금 적용' },
+ { id:'withholding', w:1, label:'근로소득세(갑종) 원천징수 신고' },
+];
+export const FAMILY_NEGATIVE = [ // 근로자성 부인요소 (−)
+ { id:'profitShare', w:1, label:'급여가 사업 이익에 따라 변동 또는 배당 성격' },
+ { id:'noControl',   w:1, label:'근무시간·장소 지정 없이 자유롭게 업무 수행' },
+ { id:'management',  w:1, label:'사업장 운영·경영 의사결정에 실질 참여' },
+];
+
+function _judgeFamilyOne({ name, rel, live, eAcq, sAcq, score, bizType }){
+ const cutoff = CUTOFF;
+ if(!live){
+  return { name, rel, live:false, score:'—',
+   empJ:'정상 (비동거)', empD:'비동거 가족은 일반 근로자와 동일 기준. 고용·산재 가입 정상.',
+   accJ:'정상 (비동거)', accD:'비동거. 산재보험 가입 정상.', eTO:null, sTO:null, eAcq, sAcq };
+ }
+ const isClose = rel.startsWith('배우자')||rel.startsWith('직계존속')||rel.startsWith('직계비속')||rel.startsWith('형제자매');
+ if(!isClose){
+  return { name, rel, live:true, score:'—',
+   empJ:'검토필요', empD:'기타 친족(4촌 이내)은 고용보험법상 명시 적용제외 조항 없음. 실질 근로관계 여부로 판단. 노무사 검토 권고.',
+   accJ:'검토필요', accD:'산재보험도 실질 노무 제공 여부로 판단. 노무사 검토 권고.', eTO:null, sTO:null, eAcq, sAcq };
+ }
+ const bizNote = bizType==='sole'
+  ? '개인사업자 동거친족 — 행정해석상 독립적 근로관계 성립을 더 엄격하게 판단.'
+  : '법인 대표이사 동거가족 — 법인 소속 근로자로서 근로자성 성립 가능하나 실질 판단 필요.';
+ let empJ, empD;
+ if(score<=2){ empJ='취득취소 가능'; empD=`동거 ${rel} + 근로자성 낮음(${score}점) → 고용보험 적용제외 가능성 높음. 취득취소 검토. ${bizNote}`; }
+ else if(score<=5){ empJ='검토필요'; empD=`동거 ${rel} + 근로자성 모호(${score}점) → 근로계약서·이체확인증·출근부 보강 후 재판단 필요. ${bizNote}`; }
+ else { empJ='정상 (근로자성 인정)'; empD=`동거 ${rel}이나 근로자성 충분히 인정(${score}점) → 고용보험 가입 유지 권고. ${bizNote}`; }
+ let accJ, accD;
+ if(score<=1){ accJ='취득취소 가능'; accD=`동거 ${rel} + 근로자성 매우 낮음(${score}점) → 산재보험 적용제외 검토. 단, 산재는 일시적 노무 제공도 포함되므로 실질 확인 후 신중 판단.`; }
+ else if(score<=4){ accJ='검토필요'; accD=`동거 ${rel} + 근로자성 낮음~모호(${score}점) → 산재보험은 적용 범위가 넓어 취득취소보다 상실신고·유지가 많음. 별도 검토 권고.`; }
+ else { accJ='정상 (근로자성 인정)'; accD=`동거 ${rel}이나 근로자성 인정(${score}점) → 산재보험 가입 유지 권고.`; }
+ const toStr=(acq,label)=>{ if(!acq)return null; if(acq<cutoff) return `${label} 취득일(${acq}) < 소멸시효 기준(${cutoff}) → 시효 내 기간(${cutoff} ~)만 환급 가능`; return `${label} 취득일(${acq}) → 전체 기간 시효 내 (기준: ${cutoff})`; };
+ return { name, rel, live:true, score, empJ, empD, accJ, accD, eTO:toStr(eAcq,'고용보험'), sTO:toStr(sAcq,'산재보험'), eAcq, sAcq };
+}
+
+function sumWeights(catalog, ids){
+ const set = new Set(ids||[]);
+ return catalog.reduce((s,c)=> s + (set.has(c.id) ? c.w : 0), 0);
+}
+
+export function judgeFamily(members, bizType){
+ CUTOFF = statuteCutoff(); TODAY = new Date().toISOString().slice(0,10);
+ const bt = bizType==='sole' ? 'sole' : 'corp';
+ const results = (members||[]).map(m=>{
+  const pos = sumWeights(FAMILY_POSITIVE, m.positive_factors);
+  const neg = sumWeights(FAMILY_NEGATIVE, m.negative_factors);
+  const score = pos - neg;
+  return _judgeFamilyOne({
+   name: m.name||'(무명)', rel: m.relation||'', live: !!m.cohabiting,
+   eAcq: fmtDate(m.emp_acquire_date), sAcq: fmtDate(m.acc_acquire_date),
+   score, bizType: bt
+  });
+ });
+ return { cutoff: CUTOFF, bizType: bt, results };
+}
+
+export function formatFamilyResult(res){
+ const L=[`■ 가족종사자 4대보험 적용제외 판정 (사업장유형: ${res.bizType==='sole'?'개인사업자':'법인'})`,`소멸시효 기준일: ${res.cutoff}`];
+ if(!res.results.length){ L.push('대상자가 없습니다.'); return L.join('\n'); }
+ res.results.forEach((r,i)=>{
+  L.push(`\n${i+1}. ${r.name} (${r.rel}) · ${r.live?'동거':'비동거'} · 근로자성점수 ${r.score}`);
+  L.push(`   고용: ${r.empJ} — ${r.empD}`);
+  L.push(`   산재: ${r.accJ} — ${r.accD}`);
+  [r.eTO,r.sTO].filter(Boolean).forEach(t=>L.push(`   시효: ${t}`));
+ });
+ L.push(`\n※ 동거 여부는 주민등록등본상 동일 주소지 기준. 취득취소 가능 결과는 실업급여·고용지원금 수급 이력·이직확인서 처리 여부 확인 필수.`);
+ L.push(`※ 참고 자료 — 최종 판단은 담당 노무사·관할 근로복지공단. 국민연금·건강보험 미대상.`);
+ return L.join('\n');
+}
+
+// =====================================================================
+// 비등기임원 판정 (점수 체크리스트) — 출처: insurance-tools 비등기임원 탭
+// =====================================================================
+export const NONREG_NEGATIVE = [ // 근로자성 부인요소 (적용제외 방향)
+ { id:'delegation',   w:3, label:'임원위촉계약서(위임계약) 작성·보관' },
+ { id:'management',   w:2, label:'이사회·경영회의 참여 및 경영의사결정 실질 관여' },
+ { id:'freeWork',     w:2, label:'근무시간·장소 미규정, 출퇴근 자유' },
+ { id:'authority',    w:1, label:'타 근로자 채용·지휘·감독 권한 보유' },
+ { id:'remuneration', w:1, label:'임원보수로 처리 (갑종 근로소득세 아닌 임원보수세)' },
+];
+export const NONREG_POSITIVE = [ // 근로자성 인정요소 (정상 유지 방향)
+ { id:'laborContract', w:3, label:'근로계약서 체결' },
+ { id:'attendance',   w:2, label:'타 직원과 동일한 출퇴근·근태 관리' },
+ { id:'benefit',      w:2, label:'타 직원과 동일 복리후생(연차·퇴직금 등) 적용' },
+ { id:'withholding',  w:1, label:'갑종 근로소득세 원천징수 신고' },
+ { id:'payslip',      w:1, label:'급여명세서 정기 발급 (근기법 §48②)' },
+];
+
+function _judgeNonregOne({ title, name, contract, eAcq, sAcq, neg, pos }){
+ const cutoff = CUTOFF; const net = neg - pos;
+ const baseNote = ({
+  delegation:'임원위촉계약서(위임계약) — 상법상 위임관계. 원칙적으로 근로자성 낮음.',
+  labor:'근로계약서 체결 — 근로자성 인정 가능성 높음.',
+  none:'별도 계약 없음(구두) — 실질 근로관계 여부로 판단.',
+ })[contract] || '계약유형 미선택 — 계약서 확인 필요.';
+ let empJ, empD;
+ // 근로계약서가 있어도 순점수>0(부인요소 우세)이면 아래 net 분기로 계속 평가됨
+ if(contract==='labor' && net<=0){ empJ='정상 (근로자성 인정)'; empD=`근로계약서 체결 + 인정요소 우세(순점수 ${net}점) → 고용보험 가입 유지 권고. ${baseNote}`; }
+ else if(net>=4){ empJ='취득취소 가능'; empD=`부인요소 우세(순점수 +${net}점) → 고용보험 적용제외 검토. ${baseNote}`; }
+ else if(net>=1){ empJ='검토필요'; empD=`판단 모호(순점수 +${net}점) → 서류 보강 및 관할 근로복지공단 확인 권고. ${baseNote}`; }
+ else { empJ='정상 (근로자성 인정)'; empD=`인정요소 우세(순점수 ${net}점) → 고용보험 가입 유지 권고. ${baseNote}`; }
+ let accJ, accD;
+ if(contract==='labor' && net<=0){ accJ='정상 (근로자성 인정)'; accD='근로계약서 체결 + 인정요소 우세 → 산재보험 가입 유지 권고.'; }
+ else if(net>=5){ accJ='취득취소 가능'; accD=`부인요소 강함(순점수 +${net}점) → 산재보험 적용제외 검토. 단, 산재는 실질 노무 제공 기준이 넓어 신중 판단 필요.`; }
+ else if(net>=2){ accJ='검토필요'; accD=`판단 모호(순점수 +${net}점) → 산재보험은 적용 범위가 넓어 취득취소보다 유지 결론이 많음. 별도 검토 권고.`; }
+ else { accJ='정상 (근로자성 인정)'; accD=`인정요소 우세(순점수 ${net}점) → 산재보험 가입 유지 권고.`; }
+ const toStr=(acq,label)=>{ if(!acq)return null; if(acq<cutoff) return `${label} 취득일(${acq}) < 소멸시효 기준(${cutoff}) → 시효 내(${cutoff}~)만 환급`; return `${label} 취득일(${acq}) → 전체 기간 시효 내 (기준: ${cutoff})`; };
+ return { title, name, contract, neg, pos, net, empJ, empD, accJ, accD, eTO:toStr(eAcq,'고용보험'), sTO:toStr(sAcq,'산재보험'), eAcq, sAcq };
+}
+
+export function judgeNonreg(members){
+ CUTOFF = statuteCutoff(); TODAY = new Date().toISOString().slice(0,10);
+ const results = (members||[]).map(m=>{
+  const neg = sumWeights(NONREG_NEGATIVE, m.negative_factors);
+  const pos = sumWeights(NONREG_POSITIVE, m.positive_factors);
+  const contract = ['delegation','labor','none'].includes(m.contract_type) ? m.contract_type : '';
+  return _judgeNonregOne({
+   title: m.title||'임원', name: m.name||'(무명)', contract,
+   eAcq: fmtDate(m.emp_acquire_date), sAcq: fmtDate(m.acc_acquire_date), neg, pos
+  });
+ });
+ return { cutoff: CUTOFF, results };
+}
+
+export function formatNonregResult(res){
+ const cl={delegation:'임원위촉(위임)',labor:'근로계약서',none:'없음(구두)','':'미선택'};
+ const L=[`■ 비등기임원 4대보험 적용제외 판정`,`소멸시효 기준일: ${res.cutoff}`];
+ if(!res.results.length){ L.push('대상자가 없습니다.'); return L.join('\n'); }
+ res.results.forEach((r,i)=>{
+  L.push(`\n${i+1}. ${r.name} (${r.title}) · 계약유형 ${cl[r.contract]||r.contract} · 부인 ${r.neg}/인정 ${r.pos}/순점수 ${r.net>=0?'+':''}${r.net}`);
+  L.push(`   고용: ${r.empJ} — ${r.empD}`);
+  L.push(`   산재: ${r.accJ} — ${r.accD}`);
+  [r.eTO,r.sTO].filter(Boolean).forEach(t=>L.push(`   시효: ${t}`));
+ });
+ L.push(`\n※ 임원위촉계약서가 있어도 실질 근로관계(출퇴근 통제·급여명세서 발급 등)가 인정되면 취득취소 불가. 비등기임원도 실질 지배종속 관계면 4대보험 의무가입.`);
+ L.push(`※ 참고 자료 — 최종 판단은 담당 노무사·관할 근로복지공단. 국민연금·건강보험 미대상.`);
+ return L.join('\n');
+}

@@ -9,7 +9,13 @@ import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import { judgeDirector, formatDirectorResult } from './judge.mjs';
+import {
+ judgeDirector, formatDirectorResult,
+ judgeFamily, formatFamilyResult, FAMILY_RELATIONS, FAMILY_POSITIVE, FAMILY_NEGATIVE,
+ judgeNonreg, formatNonregResult, NONREG_NEGATIVE, NONREG_POSITIVE
+} from './judge.mjs';
+
+const cat = arr => arr.map(f => `${f.id}(${f.w}): ${f.label}`).join(' / ');
 
 // 선택적 보호: AUTH_TOKEN 환경변수가 있으면 Authorization: Bearer 검사
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
@@ -43,6 +49,73 @@ function buildServer(){
      { type: 'text', text: '\n[구조화 결과 JSON]\n' + JSON.stringify(res, null, 2) }
     ]
    };
+  }
+ );
+
+ server.registerTool(
+  'judge_family',
+  {
+   title: '가족종사자 4대보험 적용제외 판정',
+   description:
+    '동거 가족 근로자(배우자·직계존비속·형제자매 등)의 근로자성을 체크리스트 점수로 평가해 ' +
+    '고용·산재보험 적용제외(취득취소 가능/검토필요/정상) 여부를 판정한다. ' +
+    '사용자와의 문답 또는 제출 서류로 각 대상자의 관계·동거여부·취득일과 아래 근로자성 요소 해당 여부를 파악해 전달하라.\n' +
+    `관계(relation) 후보: ${FAMILY_RELATIONS.join(' / ')}\n` +
+    `근로자성 인정요소 positive_factors 후보: ${cat(FAMILY_POSITIVE)}\n` +
+    `근로자성 부인요소 negative_factors 후보: ${cat(FAMILY_NEGATIVE)}\n` +
+    '점수=인정요소 가중치 합 − 부인요소 가중치 합. 점수가 낮을수록 적용제외(취득취소) 가능성↑.',
+   inputSchema: {
+    business_type: z.enum(['corp','sole']).default('corp').describe('사업장 유형: corp(법인) | sole(개인사업자)'),
+    members: z.array(z.object({
+     name: z.string().describe('성명'),
+     relation: z.string().describe(`대표자와의 관계 (${FAMILY_RELATIONS.join(' / ')})`),
+     cohabiting: z.boolean().describe('동거 여부(주민등록등본상 동일 주소지)'),
+     emp_acquire_date: z.string().optional().describe('고용보험 취득일 YYYY-MM-DD'),
+     acc_acquire_date: z.string().optional().describe('산재보험 취득일 YYYY-MM-DD'),
+     positive_factors: z.array(z.string()).default([]).describe('해당하는 근로자성 인정요소 id 목록'),
+     negative_factors: z.array(z.string()).default([]).describe('해당하는 근로자성 부인요소 id 목록')
+    })).min(1)
+   }
+  },
+  async ({ business_type, members }) => {
+   const res = judgeFamily(members, business_type);
+   return { content: [
+    { type:'text', text: formatFamilyResult(res) },
+    { type:'text', text: '\n[구조화 결과 JSON]\n' + JSON.stringify(res, null, 2) }
+   ] };
+  }
+ );
+
+ server.registerTool(
+  'judge_nonreg',
+  {
+   title: '비등기임원 4대보험 적용제외 판정',
+   description:
+    '등기되지 않은 임원(비등기임원)의 근로자성을 계약유형 + 체크리스트 점수로 평가해 ' +
+    '고용·산재보험 적용제외(취득취소 가능/검토필요/정상) 여부를 판정한다. ' +
+    '사용자 문답 또는 제출 서류로 계약유형과 아래 요소 해당 여부를 파악해 전달하라.\n' +
+    '계약유형(contract_type): delegation(임원위촉·위임계약) | labor(근로계약서) | none(구두·없음)\n' +
+    `근로자성 부인요소 negative_factors 후보: ${cat(NONREG_NEGATIVE)}\n` +
+    `근로자성 인정요소 positive_factors 후보: ${cat(NONREG_POSITIVE)}\n` +
+    '순점수=부인요소 합 − 인정요소 합. 순점수가 높을수록 적용제외(취득취소) 가능성↑.',
+   inputSchema: {
+    members: z.array(z.object({
+     title: z.string().default('임원').describe('직위(예: 전무, 본부장)'),
+     name: z.string().describe('성명'),
+     contract_type: z.enum(['delegation','labor','none']).describe('계약유형'),
+     emp_acquire_date: z.string().optional().describe('고용보험 취득일 YYYY-MM-DD'),
+     acc_acquire_date: z.string().optional().describe('산재보험 취득일 YYYY-MM-DD'),
+     negative_factors: z.array(z.string()).default([]).describe('해당하는 근로자성 부인요소 id 목록'),
+     positive_factors: z.array(z.string()).default([]).describe('해당하는 근로자성 인정요소 id 목록')
+    })).min(1)
+   }
+  },
+  async ({ members }) => {
+   const res = judgeNonreg(members);
+   return { content: [
+    { type:'text', text: formatNonregResult(res) },
+    { type:'text', text: '\n[구조화 결과 JSON]\n' + JSON.stringify(res, null, 2) }
+   ] };
   }
  );
 

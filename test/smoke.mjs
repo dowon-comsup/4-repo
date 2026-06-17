@@ -1,5 +1,5 @@
 // 판정 로직 스모크 테스트 (의존성 불필요): node test/smoke.mjs
-import { judgeDirector, formatDirectorResult } from '../src/judge.mjs';
+import { judgeDirector, formatDirectorResult, judgeFamily, judgeNonreg } from '../src/judge.mjs';
 
 const registry = `
 법인등기부등본
@@ -41,5 +41,28 @@ check('JOHN SMITH', `이름 표기 상이 안내 노출`, john && /이름 표기
 // ③ 과거 임기 재취득: 이순신(2015~2018 임원, 가입 2015~2018) → 정상 또는 대상아님 류(부지급 아님 단정 X)
 const lee = byName['이순신'];
 check('이순신', `과거 임기 케이스 정상 산출(판정=${lee?.judgment})`, lee && lee.judgment);
+
+// ── 가족종사자 ──────────────────────────────────────
+const fam = judgeFamily([
+ { name:'배우자A', relation:'배우자', cohabiting:true, positive_factors:[], negative_factors:[] },
+ { name:'자녀B', relation:'직계비속 (자녀·손자녀 등)', cohabiting:true,
+   positive_factors:['contract','transfer','payslip','attendance','benefit','withholding'], negative_factors:[] },
+ { name:'사촌C', relation:'기타 친족 (4촌 이내)', cohabiting:true, positive_factors:[], negative_factors:[] },
+], 'corp');
+const fByName = Object.fromEntries(fam.results.map(r=>[r.name,r]));
+check('가족-배우자A', `점수0 → 취득취소 가능 (고용=${fByName['배우자A']?.empJ})`, fByName['배우자A']?.empJ==='취득취소 가능');
+check('가족-자녀B', `요소 다수 → 정상 (고용=${fByName['자녀B']?.empJ})`, /정상/.test(fByName['자녀B']?.empJ||''));
+check('가족-사촌C', `기타친족 → 검토필요 (고용=${fByName['사촌C']?.empJ})`, fByName['사촌C']?.empJ==='검토필요');
+
+// ── 비등기임원 ──────────────────────────────────────
+const nr = judgeNonreg([
+ { title:'전무', name:'위임D', contract_type:'delegation',
+   negative_factors:['delegation','management','freeWork','authority','remuneration'], positive_factors:[] },
+ { title:'본부장', name:'근로E', contract_type:'labor',
+   positive_factors:['laborContract','attendance','benefit','withholding','payslip'], negative_factors:[] },
+]);
+const nByName = Object.fromEntries(nr.results.map(r=>[r.name,r]));
+check('비등기-위임D', `순점수 높음 → 취득취소 가능 (고용=${nByName['위임D']?.empJ})`, nByName['위임D']?.empJ==='취득취소 가능');
+check('비등기-근로E', `근로계약+인정우세 → 정상 (고용=${nByName['근로E']?.empJ})`, /정상/.test(nByName['근로E']?.empJ||''));
 
 console.log('\n검증 종료. exitCode=', process.exitCode||0);
