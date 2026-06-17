@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dowon-insurance-mcp
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # 선택: 커넥터 보호용 토큰. 설정 시 claude.ai 커넥터에 Authorization: Bearer <값> 헤더 필요.
+      # - key: AUTH_TOKEN
+      #   sync: false
+# 이 폴더(insurance-mcp)를 단독 git 저장소로 배포하면 위 설정 그대로 사용.
+# 더 큰 저장소의 하위 폴더로 배포할 경우 Render 서비스의 Root Directory를
+# 02_automation/insurance-mcp 로 지정할 것.
