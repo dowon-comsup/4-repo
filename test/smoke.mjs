@@ -28,19 +28,39 @@ const byName = Object.fromEntries(res.results.map(r => [r.name, r]));
 
 function check(name, label, cond){ console.log(`${cond?'✅':'❌'} ${name}: ${label}`); if(!cond) process.exitCode=1; }
 
-// ① 시효 버그 수정 확인: 홍길동 산재(2019가입,2019임원,상실없음) → 시효경과 아님, 상실신고
+// ⓪ 시간대: cutoff/today가 KST 기준 YYYY-MM-DD이고 cutoff = today − 3년
+check('시간대', `cutoff(${res.cutoff})·today(${res.today}) KST 형식 + 3년차`,
+ /^\d{4}-\d{2}-\d{2}$/.test(res.cutoff) && /^\d{4}-\d{2}-\d{2}$/.test(res.today)
+ && Number(res.today.slice(0,4)) - Number(res.cutoff.slice(0,4)) === 3
+ && res.cutoff.slice(5) === res.today.slice(5));
+
+// ① 티어 분기: 홍길동=사내이사(TIER2) 산재 잠정 상실신고 → 기본 '검토필요'로 하향, 잠정·근로자성 사유 보존
 const hong = byName['홍길동'];
-check('홍길동', `산재=상실신고 (시효경과 아님), 종합=${hong?.judgment}`, hong && hong.judgmentS === '상실신고');
+check('홍길동', `사내이사 기본 하향: 산재=검토필요 (종합=${hong?.judgment})`, hong && hong.judgmentS === '검토필요');
+check('홍길동', `잠정판정(상실신고)·근로자성 안내 사유 보존`, hong && /상실신고/.test(hong.reason) && /근로자성/.test(hong.reason));
 check('홍길동', `환급구간이 CUTOFF(${res.cutoff})부터 — 시효 내 부분만`, hong && /환급구간/.test(hong.reason) && hong.reason.includes(res.cutoff));
 
-// ② 외국인 매칭: JOHN SMITH(등기) ↔ 존스미스(고용) 등록번호로 매칭 + 이름 표기 상이 안내
-const john = byName['JOHN SMITH'];
-check('JOHN SMITH', `등록번호로 매칭되어 고용 판정 산출(취득취소), 종합=${john?.judgment}`, john && john.judgmentE === '취득취소');
-check('JOHN SMITH', `이름 표기 상이 안내 노출`, john && /이름 표기 상이/.test(john.confirm) && john.confirm.includes('존스미스'));
+// ①-b 오버레이: 홍길동을 non_worker로 확정 → 잠정 상실신고가 액션으로 복원
+const resHongNW = judgeDirector(registry, employment, [{ name:'홍길동', rrn6:'800101', worker_status:'non_worker' }]);
+const hongNW = resHongNW.results.find(r=>r.name==='홍길동');
+check('홍길동(non_worker)', `근로자성 부인 확정 → 산재=상실신고 복원 (종합=${hongNW?.judgment})`, hongNW && hongNW.judgmentS === '상실신고');
+// ①-c 오버레이: 홍길동을 worker로 확정 → 정상
+const resHongW = judgeDirector(registry, employment, [{ name:'홍길동', worker_status:'worker' }]);
+const hongW = resHongW.results.find(r=>r.name==='홍길동');
+check('홍길동(worker)', `근로자성 인정 확정 → 산재=정상 (종합=${hongW?.judgment})`, hongW && hongW.judgmentS === '정상');
 
-// ③ 과거 임기 재취득: 이순신(2015~2018 임원, 가입 2015~2018) → 정상 또는 대상아님 류(부지급 아님 단정 X)
+// ② TIER1 유지 + 외국인 매칭: JOHN SMITH=대표이사 → 하향 없이 취득취소, 등록번호 매칭·이름 상이 안내
+const john = byName['JOHN SMITH'];
+check('JOHN SMITH', `대표이사(TIER1)는 하향 없음: 고용=취득취소 (종합=${john?.judgment})`, john && john.judgmentE === '취득취소');
+check('JOHN SMITH', `이름 표기 상이 안내 노출`, john && /이름 표기 상이/.test(john.confirm) && john.confirm.includes('존스미스'));
+// ②-b TIER1 worker 오버레이(예외적 대표 근로자성 인정): 취득취소 → 정상
+const resJohnW = judgeDirector(registry, employment, [{ name:'JOHN SMITH', worker_status:'worker' }]);
+const johnW = resJohnW.results.find(r=>r.name==='JOHN SMITH');
+check('JOHN SMITH(worker)', `대표 근로자성 인정 입력 → 고용=정상 (종합=${johnW?.judgment})`, johnW && johnW.judgmentE === '정상');
+
+// ③ 과거 임기 재취득: 이순신=감사(TIER2)·시효경과(비액션) → 하향 대상 아님, 시효경과 유지
 const lee = byName['이순신'];
-check('이순신', `과거 임기 케이스 정상 산출(판정=${lee?.judgment})`, lee && lee.judgment);
+check('이순신', `과거임기·시효경과(비액션) 유지(판정=${lee?.judgment})`, lee && lee.judgment === '시효경과');
 
 // ── 가족종사자 ──────────────────────────────────────
 const fam = judgeFamily([

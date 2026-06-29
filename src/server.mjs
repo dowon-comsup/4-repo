@@ -32,18 +32,29 @@ function buildServer(){
    description:
     '법인등기부등본 텍스트와 4대보험 고용현황 텍스트를 받아, 등기임원(대표이사·이사·감사 등)별로 ' +
     '고용·산재보험 적용제외 여부(취득취소/상실신고/상실일정정/시효경과/정상)와 환급구간을 판정한다. ' +
-    '보험료 소멸시효 3년(징수법 §41)을 반영하며, 외국인은 등록번호 6자리로 동일인 매칭한다. ' +
+    '보험료 소멸시효 3년(징수법 §41)을 KST 기준으로 반영하며, 외국인은 등록번호 6자리로 동일인 매칭한다. ' +
+    '【직위 판정강도】 적용제외는 직위가 아니라 근로자성 부인으로 성립한다(대법 2003다5061). ' +
+    '대표이사·이사장은 적용제외 원칙으로 날짜 판정을 그대로 내고, 사내이사·이사·감사는 근로자성 인정 여지가 커 ' +
+    "기본적으로 '검토필요'로 보수적 하향(잠정판정은 사유에 보존)한다. " +
+    '사내이사·이사·감사의 근로자성(상근/업무집행권/지휘감독/위임계약 여부)을 사용자 문답이나 서류로 확인했다면 ' +
+    'officer_status 로 전달해 확정하라(non_worker=취득취소 등 액션 유지 / worker=정상). ' +
     '사용법: 사용자가 올린 등기부등본 PDF와 고용현황(PDF/엑셀)을 너(Claude)가 읽어 ' +
     '원문 텍스트를 그대로 추출한 뒤 registry_text·employment_text 로 전달하라. ' +
     '등기부 텍스트에는 직위·성명·등록번호(앞 6자리)·취임/사임/중임/퇴임 등 날짜를, ' +
-    '고용현황에는 성명·등록번호 앞 6자리·취득일·상실일·보험구분(고용/산재)을 최대한 보존할 것.',
+    '고용현황에는 성명·등록번호 앞 6자리·취득일·상실일·보험구분(고용/산재)을 최대한 보존할 것. ' +
+    '국민연금·건강보험(무보수 대표 적용제외 등)은 본 도구 범위 밖이다.',
    inputSchema: {
     registry_text: z.string().min(1).describe('법인등기부등본 원문 텍스트(임원 직위·성명·등록번호 6자리·취임/사임 등 날짜 포함)'),
-    employment_text: z.string().min(1).describe('4대보험 고용현황 원문 텍스트(성명·등록번호 6자리·취득일·상실일·보험구분 포함)')
+    employment_text: z.string().min(1).describe('4대보험 고용현황 원문 텍스트(성명·등록번호 6자리·취득일·상실일·보험구분 포함)'),
+    officer_status: z.array(z.object({
+     name: z.string().describe('등기부상 성명(영문명 포함, 등기부 표기와 동일하게)'),
+     rrn6: z.string().optional().describe('등록번호 앞 6자리(생년월일). 동명이인 구분용, 가능하면 함께 전달'),
+     worker_status: z.enum(['non_worker','worker','unknown']).describe("근로자성 확정값: non_worker(근로자 아님 → 취득취소 등 액션 유지) | worker(근로자 인정 → 정상) | unknown(미확인, 기본)")
+    })).optional().describe("사내이사·이사·감사의 근로자성을 확인한 경우에만 전달. 대표이사·이사장은 보통 불필요. 미확인 임원은 생략(기본 '검토필요').")
    }
   },
-  async ({ registry_text, employment_text }) => {
-   const res = judgeDirector(registry_text, employment_text);
+  async ({ registry_text, employment_text, officer_status }) => {
+   const res = judgeDirector(registry_text, employment_text, officer_status);
    const text = formatDirectorResult(res);
    return {
     content: [

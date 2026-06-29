@@ -6,7 +6,14 @@
  *
  * 근거: 고용보험및산업재해보상보험의보험료징수등에관한법률 §41(보험료 소멸시효 3년),
  *       근로기준법 §2①1, 고용보험법 §2①1, 대법원 2003다5061(2003.9.26.)
+ *
+ * ⚠⚠ 동기화 대상 ⚠⚠
+ *   본 판정 알고리즘은 insurance-tools/tools/director-insurance-v2.html 의
+ *   인라인 스크립트(judgeOne / judge / refundWindow / 시간대·티어 로직)와 1:1로 같다.
+ *   한쪽만 고치면 조용히 드리프트한다. 변경 시 반드시 양쪽을 함께 수정하고
+ *   아래 LOGIC_VERSION 을 같이 올릴 것.
  */
+const LOGIC_VERSION = '2026-06-26'; // 직위 티어 분기 + KST 시간대 도입
 
 // ── 상수 ──────────────────────────────────────────────
 const STATUTE_YEARS = 3;
@@ -14,14 +21,20 @@ const REAPPOINT_GAP_DAYS = 365;   // 사임 후 재취임 갭이 짧으면 실�
 const LOSS_TOLERANCE_DAYS = 1;    // 보험상실일 vs 등기 사임일 허용 시차
 const J_RANK = { '취득취소':7,'상실신고':6,'상실일정정':5,'사업장확인필요':4,'검토필요':3,'정상':2,'시효경과':1,'미가입':1,'대상아님':0 };
 
+// ⚠ 시간대: KST(Asia/Seoul) 고정. UTC(toISOString)로 산출하면 한국 자정~오전9시에
+//   날짜가 하루 밀려 소멸시효 경계일이 ±1일 오판될 수 있어 KST로 통일한다(CLAUDE.md §10-5.4).
+function todayKST(){
+ return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+}
+function statuteCutoff(){
+ const [y,m,d] = todayKST().split('-');
+ // 윤년 2/29 보정: 3년 전이 평년이면 2/29가 없어 무효 문자열이 되므로 2/28로 내린다.
+ const dd = (m==='02' && d==='29') ? '28' : d;
+ return `${Number(y)-STATUTE_YEARS}-${m}-${dd}`;
+}
 // CUTOFF/TODAY는 judgeDirector()에서 매 호출 시 재계산
 let CUTOFF = statuteCutoff();
-let TODAY = new Date().toISOString().slice(0, 10);
-
-function statuteCutoff(){
- const d = new Date(); d.setFullYear(d.getFullYear() - STATUTE_YEARS);
- return d.toISOString().slice(0, 10);
-}
+let TODAY = todayKST();
 
 // ── 공통 헬퍼 ─────────────────────────────────────────
 function fmtDate(v){
@@ -329,6 +342,42 @@ function judgeOne(off, r, label){
  return {j:'검토필요',reason:`[${label}] 보험 취득일 미확인`,confirm:''};
 }
 
+// ── 직위 티어 보정 (근로자성 전제) ─────────────────────
+// 등기임원이라도 적용제외는 "직위"가 아니라 "근로자성 부인"으로 성립한다.
+//  · 근거: 근기법 §2①1·고용보험법 §2①1(근로자성), 대법 2003다5061(2003.9.26.) —
+//          등기임원이라도 대표권·업무집행권 없이 사용종속관계가 인정되면 근로자.
+//  · TIER1(대표이사·이사장): 대표권 보유 → 적용제외 원칙. 날짜 판정 그대로.
+//  · TIER2(사내이사·이사·감사): 근로자성 인정 여지가 큼 → 직위만으로 취득취소 단정 금지.
+//          기본(unknown)은 헤드라인을 '검토필요'로 하향하되 잠정판정을 사유에 보존.
+//  · worker_status 입력으로 확정 가능: non_worker(근로자 아님 확정→액션 유지) / worker(근로자 확정→정상)
+const TIER2_POS = ['사내이사','이사','감사'];
+const ACTIONABLE = new Set(['취득취소','상실신고','상실일정정']);
+
+function applyWorkerNature(pos, status, jr){
+ const st = status || 'unknown';
+ if(pos==='대표이사' || pos==='이사장'){
+  if(st==='worker' && ACTIONABLE.has(jr.j)){
+   return {j:'정상',
+    reason:jr.reason+`\n   → [근로자성 인정 입력] 대표권 보유자이나 사용종속 근로자성 인정 → 가입 유지(정상). 대표의 근로자성 인정은 예외적이므로 고정보수·지휘감독 실태 근거 필요`,
+    confirm:jr.confirm};
+  }
+  return jr; // 적용제외 원칙 — 날짜 판정 그대로
+ }
+ if(TIER2_POS.includes(pos) && ACTIONABLE.has(jr.j)){
+  if(st==='non_worker') return jr;          // 근로자 아님 확정 → 액션 유지(취득취소 등)
+  if(st==='worker'){
+   return {j:'정상',
+    reason:jr.reason+`\n   → [근로자성 인정 입력] ${pos} 사용종속 근로자성 인정 → 4대보험 가입 유지(정상)`,
+    confirm:jr.confirm};
+  }
+  // unknown(기본): 잠정판정 보존 + 헤드라인 '검토필요'로 하향
+  return {j:'검토필요',
+   reason:jr.reason+`\n   ⚠ ${pos}는 직위만으로 적용제외 단정 불가 — 대표권·업무집행권 부존재 및 사용종속관계(상근·지휘감독·고정보수) 확인 전제. 근로자성 부인 시 "${jr.j}", 인정 시 "정상"`,
+   confirm:(jr.confirm?jr.confirm+'\n':'')+`[근로자성 확인] ${pos} 적용제외는 근로자성 부인 시에만 성립(고용보험법 §2①1·근기법 §2①1·대법 2003다5061). 비상근·무보수·위임계약·경영의사결정 참여 여부 확인 후 확정(확정 시 worker_status 입력).`};
+ }
+ return jr; // 사외이사(이미 검토필요)·비액션 판정·기타 → 그대로
+}
+
 // ── 임원 1인 종합 판정 (고용·산재) ─────────────────────
 function judge(off, recs){
  const mine = recs.filter(r=>recMatchesOfficer(r,off));
@@ -346,8 +395,9 @@ function judge(off, recs){
     reason:`[${off.periodLabel}] 해당 임기(${off.appoint} ~ ${off.resign}) 구간 내 고용·산재 가입이력 없음`,
     confirm:'',eAcq:'',eLoss:'',sAcq:'',sLoss:''}];
   }
-  const ej = judgeOne(off,eRec,'고용');
-  const sj = judgeOne(off,sRec,'산재');
+  const _st = off.workerStatus || 'unknown';
+  const ej = applyWorkerNature(off.pos, _st, judgeOne(off,eRec,'고용'));
+  const sj = applyWorkerNature(off.pos, _st, judgeOne(off,sRec,'산재'));
   const top = (J_RANK[ej.j]||0)>=(J_RANK[sj.j]||0)?ej.j:sj.j;
   let reason = `[${off.periodLabel}: ${off.appoint} ~ ${off.resign}]\n`+ej.reason+'\n'+sj.reason;
   reason += `\n⚠ 과거 임기 — 고용현황 크로스체크 결과이며, 현행 임기와 별도로 확인 필요`;
@@ -367,8 +417,9 @@ function judge(off, recs){
  if(!eRec && !sRec){
   return [{...off,judgment:'대상아님',judgmentE:'-',judgmentS:'-',reason:'고용·산재 모두 가입이력 없음',confirm:'',eAcq:'',eLoss:'',sAcq:'',sLoss:''}];
  }
- const ej = judgeOne(off,eRec,'고용');
- const sj = judgeOne(off,sRec,'산재');
+ const _st = off.workerStatus || 'unknown';
+ const ej = applyWorkerNature(off.pos, _st, judgeOne(off,eRec,'고용'));
+ const sj = applyWorkerNature(off.pos, _st, judgeOne(off,sRec,'산재'));
  const top = (J_RANK[ej.j]||0) >= (J_RANK[sj.j]||0) ? ej.j : sj.j;
  const notes = [];
  if(eRecs.length>1) notes.push(`고용 ${eRecs.length}건 중 최신 사용`);
@@ -383,15 +434,32 @@ function judge(off, recs){
   eAcq:eRec?.acq||'',eLoss:eRec?.loss||'',sAcq:sRec?.acq||'',sLoss:sRec?.loss||''}];
 }
 
+// 근로자성 오버레이 매칭: {name, rrn6?, worker_status} 목록을 등기부 임원에 연결.
+// 등록번호(6자리) 우선, 없으면 성명으로 매칭. 허용값 외에는 unknown 처리.
+const _ALLOWED_STATUS = new Set(['non_worker','worker','unknown']);
+function resolveWorkerStatus(off, overlay){
+ if(!Array.isArray(overlay) || !overlay.length) return 'unknown';
+ // off.rrn은 파싱 단계에서 이미 6자리. o.rrn6에 풀번호(800101-1234567)가 와도 안전하도록 slice(0,6) 방어.
+ let m = overlay.find(o => o && o.rrn6 && String(o.rrn6).slice(0,6) === off.rrn);
+ if(!m) m = overlay.find(o => o && o.name && o.name === off.name);
+ const s = m && m.worker_status;
+ return _ALLOWED_STATUS.has(s) ? s : 'unknown';
+}
+
 // ── 진입점 ────────────────────────────────────────────
-export function judgeDirector(registryText, employmentText){
- // 서버 장기 실행 대응: 시효 기준일을 호출 시점마다 갱신
+// officerStatus(선택): [{name, rrn6?, worker_status:'non_worker'|'worker'|'unknown'}]
+//   사내이사·이사·감사의 근로자성을 확정 입력하면 '검토필요' 기본값을 취득취소/정상으로 전환한다.
+export function judgeDirector(registryText, employmentText, officerStatus){
+ // 서버 장기 실행 대응: 시효 기준일을 호출 시점마다 KST로 갱신
  CUTOFF = statuteCutoff();
- TODAY = new Date().toISOString().slice(0,10);
+ TODAY = todayKST();
 
  const officers = parseRegistry(registryText || '');
- // 공동대표 친족분석은 MVP 범위 외 → 플래그 기본값
- officers.forEach(o=>{ o.isCoCeo=false; o.coCeoPartners=[]; o.isActiveCoCeo=false; });
+ // 공동대표 친족분석은 MVP 범위 외 → 플래그 기본값. 근로자성 오버레이 연결.
+ officers.forEach(o=>{
+  o.isCoCeo=false; o.coCeoPartners=[]; o.isActiveCoCeo=false;
+  o.workerStatus = resolveWorkerStatus(o, officerStatus);
+ });
  const biz = extractBizInfo(registryText || '');
  const recs = parseEmpText(employmentText || '');
 
@@ -399,11 +467,12 @@ export function judgeDirector(registryText, employmentText){
  officers.forEach(o=>{ judge(o,recs).forEach(j=>results.push(j)); });
 
  return {
-  cutoff: CUTOFF, today: TODAY,
+  cutoff: CUTOFF, today: TODAY, logicVersion: LOGIC_VERSION,
   biz, officerCount: officers.length, recordCount: recs.length,
   results: results.map(r=>({
    pos:r.pos, name:r.name, rrn:r.rrn ? r.rrn+'-*' : '',
    periodLabel:r.periodLabel||'', appoint:r.appoint||'', resign:r.resign||'',
+   workerStatus:r.workerStatus||'unknown',
    judgment:r.judgment, judgmentE:r.judgmentE, judgmentS:r.judgmentS,
    eAcq:r.eAcq, eLoss:r.eLoss, sAcq:r.sAcq, sLoss:r.sLoss,
    reason:r.reason, confirm:r.confirm
@@ -425,15 +494,19 @@ export function formatDirectorResult(res){
  const cnt = {};
  res.results.forEach(r=>cnt[r.judgment]=(cnt[r.judgment]||0)+1);
  lines.push(`요약: ` + Object.entries(cnt).map(([k,v])=>`${k} ${v}건`).join(' / '));
+ lines.push(`판정강도: 대표이사·이사장=적용제외 원칙 / 사내이사·이사·감사=근로자성 확인 전제(기본 '검토필요', 비상근·무보수 등 확정 시 worker_status 입력으로 취득취소/정상 전환)`);
+ const _stLabel = {non_worker:'근로자성 부인(확정)', worker:'근로자성 인정(확정)'};
  res.results.forEach((r,i)=>{
-  lines.push(`\n${i+1}. ${r.name} (${r.pos})${r.periodLabel?' ['+r.periodLabel+']':''} ${r.rrn}`);
+  const stTag = _stLabel[r.workerStatus] ? ` [근로자성: ${_stLabel[r.workerStatus]}]` : '';
+  lines.push(`\n${i+1}. ${r.name} (${r.pos})${r.periodLabel?' ['+r.periodLabel+']':''} ${r.rrn}${stTag}`);
   lines.push(`   임원 취임:${r.appoint||'-'} 퇴임:${r.resign||'-'} | 고용 취득:${r.eAcq||'-'} 상실:${r.eLoss||'-'} / 산재 취득:${r.sAcq||'-'} 상실:${r.sLoss||'-'}`);
   lines.push(`   판정: 고용=${r.judgmentE} · 산재=${r.judgmentS} (종합 ${r.judgment})`);
   if(r.reason) lines.push(`   사유: ${r.reason.replace(/\n/g,'\n         ')}`);
   if(r.confirm) lines.push(`   확인필요: ${r.confirm.replace(/\n/g,'\n         ')}`);
  });
  lines.push(`\n※ 본 판정은 체크리스트·등기부 크로스체크 기반 참고 자료입니다. 최종 판단은 담당 노무사·관할 근로복지공단이 확인합니다.`);
- lines.push(`※ 국민연금·건강보험은 본 도구에서 다루지 않습니다.`);
+ lines.push(`※ 등기임원 적용제외는 직위가 아니라 근로자성 부인(대표권·업무집행권 부존재, 사용종속관계 부인)으로 성립합니다(대법 2003다5061).`);
+ lines.push(`※ 국민연금·건강보험은 본 도구 범위 밖 — 특히 무보수 대표이사의 국민연금·건강보험 적용제외(사업장가입자 제외)는 별도 판단이 필요합니다.`);
  return lines.join('\n');
 }
 
@@ -489,7 +562,7 @@ function sumWeights(catalog, ids){
 }
 
 export function judgeFamily(members, bizType){
- CUTOFF = statuteCutoff(); TODAY = new Date().toISOString().slice(0,10);
+ CUTOFF = statuteCutoff(); TODAY = todayKST();
  const bt = bizType==='sole' ? 'sole' : 'corp';
  const results = (members||[]).map(m=>{
   const pos = sumWeights(FAMILY_POSITIVE, m.positive_factors);
@@ -559,7 +632,7 @@ function _judgeNonregOne({ title, name, contract, eAcq, sAcq, neg, pos }){
 }
 
 export function judgeNonreg(members){
- CUTOFF = statuteCutoff(); TODAY = new Date().toISOString().slice(0,10);
+ CUTOFF = statuteCutoff(); TODAY = todayKST();
  const results = (members||[]).map(m=>{
   const neg = sumWeights(NONREG_NEGATIVE, m.negative_factors);
   const pos = sumWeights(NONREG_POSITIVE, m.positive_factors);
