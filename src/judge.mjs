@@ -13,7 +13,7 @@
  *   한쪽만 고치면 조용히 드리프트한다. 변경 시 반드시 양쪽을 함께 수정하고
  *   아래 LOGIC_VERSION 을 같이 올릴 것.
  */
-const LOGIC_VERSION = '2026-06-26'; // 직위 티어 분기 + KST 시간대 도입
+const LOGIC_VERSION = '2026-10-19'; // 취득취소 = 소멸시효 미적용·전기간 (종전 2026-06-26: 직위 티어 분기 + KST 시간대 도입)
 
 // ── 상수 ──────────────────────────────────────────────
 const STATUTE_YEARS = 3;
@@ -85,9 +85,14 @@ function refundWindow(startWrong, loss){
  const partial = startWrong < CUTOFF;
  return {expired:false,start:partial?CUTOFF:startWrong,endLabel:loss||'현재',partial,origStart:startWrong};
 }
+// 취득취소(취소신고)는 소멸시효 미적용 — 보험취득일부터 전기간 (정본 4대보험/소멸시효-총괄 「취소신고 = 시효 미적용, 전기간」, 2026-10-19 반영)
+//   종전: 상실신고와 같은 3년 절단 + 전부 시효 밖이면 '시효경과(환급 불가)'로 강등 → 원텍·서천 건 재발 원인
+function cancelWindow(acq, loss){
+ return {expired:false,start:acq,endLabel:loss||'현재',partial:false,cancel:true};
+}
 function fmtWindow(w){
  if(!w || w.start==null) return '';
- return `환급구간: ${w.start} ~ ${w.endLabel}`
+ return `환급구간: ${w.start} ~ ${w.endLabel}` + (w.cancel?' (취소신고 — 소멸시효 미적용, 전기간)':'')
   + (w.partial?` (잘못 납부 시작 ${w.origStart}은 소멸시효(${STATUTE_YEARS}년·기준 ${CUTOFF}) 밖 → ${CUTOFF}부터만 환급 가능)`:'');
 }
 
@@ -296,14 +301,11 @@ function judgeOne(off, r, label){
     reason:`[${label}] 보험취득일(${acq}) ≥ 최초 임원취임일(${app})이나, 해당 시점이 임원 임기 갭 구간(사임~재취임 사이)에 위치 → 취득취소 단정 불가`,
     confirm:`취득일(${acq}) 시점에 임원 신분이었는지(보수 수령·이사회 참여 등) 사업장 확인 필요. 임원이었다면 취득취소, 아니면 정상`};
   }
-  const wA = refundWindow(acq,loss);
+  const wA = cancelWindow(acq,loss);
   if(reGap){
    return {j:'사업장확인필요',
     reason:`[${label}] 보험취득일(${acq}) ≥ 임원취임일(${app}) → 1차 판정 취득취소. 다만 ${reGap.prevEnd} 사임 후 ${reGap.nextStart} 재취임(갭 ${reGap.days}일) 이력 존재`,
-    confirm:`임기 사이 갭이 짧음(${reGap.days}일) → 임기만료 후 재취임 절차일 가능성. 실질 연속근무 입증 시 취득취소(전기간), 단절 시 일부기간만 해당. 사업장 확인 필요. ${wA.expired?'(잘못 납부 구간이 전부 소멸시효 밖)':'추정 '+fmtWindow(wA)}`};
-  }
-  if(wA.expired){
-   return {j:'시효경과',reason:`[${label}] 보험취득일(${acq}) ≥ 임원취임일(${app}) → 취득취소 대상이나, 잘못 납부 구간(${acq} ~ ${loss||'현재'})이 전부 소멸시효(${STATUTE_YEARS}년·기준 ${CUTOFF}) 경과 → 환급 불가`,confirm:''};
+    confirm:`임기 사이 갭이 짧음(${reGap.days}일) → 임기만료 후 재취임 절차일 가능성. 실질 연속근무 입증 시 취득취소(전기간), 단절 시 일부기간만 해당. 사업장 확인 필요. 추정 ${fmtWindow(wA)}`};
   }
   return {j:'취득취소',reason:`[${label}] 보험취득일(${acq}) ≥ 임원취임일(${app}) → 처음부터 적용제외 대상. 취득 자체를 무효화(취득취소). ${fmtWindow(wA)}`,confirm:''};
  }

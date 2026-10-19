@@ -58,9 +58,10 @@ const resJohnW = judgeDirector(registry, employment, [{ name:'JOHN SMITH', worke
 const johnW = resJohnW.results.find(r=>r.name==='JOHN SMITH');
 check('JOHN SMITH(worker)', `대표 근로자성 인정 입력 → 고용=정상 (종합=${johnW?.judgment})`, johnW && johnW.judgmentE === '정상');
 
-// ③ 과거 임기 재취득: 이순신=감사(TIER2)·시효경과(비액션) → 하향 대상 아님, 시효경과 유지
+// ③ 과거 임기 취득: 이순신=감사(TIER2). 취소신고는 소멸시효 미적용(전기간, 정본 2026-10-19 반영) → 시효경과로 강등하지 않고
+//    취득취소 후보 → TIER2라 근로자성 확인 전 '검토필요' (종전 기대값 '시효경과'는 취소를 3년으로 자르던 오류)
 const lee = byName['이순신'];
-check('이순신', `과거임기·시효경과(비액션) 유지(판정=${lee?.judgment})`, lee && lee.judgment === '시효경과');
+check('이순신', `과거임기 취득취소 = 전기간 → TIER2 검토필요(판정=${lee?.judgment})`, lee && lee.judgment === '검토필요' && !/시효경과/.test(lee.reason||''));
 
 // ── 가족종사자 ──────────────────────────────────────
 const fam = judgeFamily([
