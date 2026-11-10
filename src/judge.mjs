@@ -5,7 +5,7 @@
  * judgeDirector() 호출 시점에 재계산한다(매일 갱신되도록).
  *
  * 근거: 고용보험및산업재해보상보험의보험료징수등에관한법률 §41(보험료 소멸시효 3년),
- *       근로기준법 §2①1, 고용보험법 §2①1, 대법원 2003다5061(2003.9.26.)
+ *       근로기준법 §2①1, 고용보험법 §2①1, 대법원 2002다64681(2003.9.26.)
  *
  * ⚠⚠ 동기화 대상 ⚠⚠
  *   본 판정 알고리즘은 insurance-tools/tools/director-insurance-v2.html 의
@@ -13,7 +13,7 @@
  *   한쪽만 고치면 조용히 드리프트한다. 변경 시 반드시 양쪽을 함께 수정하고
  *   아래 LOGIC_VERSION 을 같이 올릴 것.
  */
-const LOGIC_VERSION = '2026-10-19'; // 취득취소 = 소멸시효 미적용·전기간 (종전 2026-06-26: 직위 티어 분기 + KST 시간대 도입)
+const LOGIC_VERSION = '2026-11-10'; // 조합장=대표자(TIER1) 추가 (종전 2026-10-19: 취득취소 = 소멸시효 미적용·전기간 (종전 2026-06-26: 직위 티어 분기 + KST 시간대 도입))
 
 // ── 상수 ──────────────────────────────────────────────
 const STATUTE_YEARS = 3;
@@ -99,7 +99,7 @@ function fmtWindow(w){
 // ── 등기부등본 파싱 ───────────────────────────────────
 // 이름: 한글뿐 아니라 영문·혼용(외국인 풀네임)도 허용 — 등록번호(6자리)로 종료 앵커
 function parseRegistry(text){
- const posRe = /(이사장|대표이사|사내이사|사외이사|감사|이사)\s*([가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?)\s*(\d{6})\s*-?\s*\*+/;
+ const posRe = /(이사장|조합장|대표이사|사내이사|사외이사|감사|이사)\s*([가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?)\s*(\d{6})\s*-?\s*\*+/;
  const dateRe = /(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(취임|중임|퇴임|사임|해임|사망|임기만료)/g;
  const TERM = ['사임','퇴임','해임','사망','임기만료'];
  const lines = text.split('\n');
@@ -284,7 +284,7 @@ function pickLatest(recs){
 
 // ── 개인 단위 판정 (고용/산재 각각) ─────────────────────
 function judgeOne(off, r, label){
- const exemptPos = ['대표이사','이사장','사내이사','감사','이사'];
+ const exemptPos = ['대표이사','이사장','조합장','사내이사','감사','이사'];
  const isExempt = exemptPos.includes(off.pos);
  if(off.pos==='사외이사') return {j:'검토필요',reason:`[${label}] 사외이사 - 상근/비상근 확인 필요 (비상근이면 적용제외)`,confirm:''};
  if(!isExempt) return {j:'검토필요',reason:`[${label}] 직위 확인 필요`,confirm:''};
@@ -346,9 +346,9 @@ function judgeOne(off, r, label){
 
 // ── 직위 티어 보정 (근로자성 전제) ─────────────────────
 // 등기임원이라도 적용제외는 "직위"가 아니라 "근로자성 부인"으로 성립한다.
-//  · 근거: 근기법 §2①1·고용보험법 §2①1(근로자성), 대법 2003다5061(2003.9.26.) —
+//  · 근거: 근기법 §2①1·고용보험법 §2①1(근로자성), 대법 2002다64681(2003.9.26.) —
 //          등기임원이라도 대표권·업무집행권 없이 사용종속관계가 인정되면 근로자.
-//  · TIER1(대표이사·이사장): 대표권 보유 → 적용제외 원칙. 날짜 판정 그대로.
+//  · TIER1(대표이사·이사장·조합장): 대표권 보유 → 적용제외 원칙. 날짜 판정 그대로.
 //  · TIER2(사내이사·이사·감사): 근로자성 인정 여지가 큼 → 직위만으로 취득취소 단정 금지.
 //          기본(unknown)은 헤드라인을 '검토필요'로 하향하되 잠정판정을 사유에 보존.
 //  · worker_status 입력으로 확정 가능: non_worker(근로자 아님 확정→액션 유지) / worker(근로자 확정→정상)
@@ -357,7 +357,7 @@ const ACTIONABLE = new Set(['취득취소','상실신고','상실일정정']);
 
 function applyWorkerNature(pos, status, jr){
  const st = status || 'unknown';
- if(pos==='대표이사' || pos==='이사장'){
+ if(pos==='대표이사' || pos==='이사장' || pos==='조합장'){
   if(st==='worker' && ACTIONABLE.has(jr.j)){
    return {j:'정상',
     reason:jr.reason+`\n   → [근로자성 인정 입력] 대표권 보유자이나 사용종속 근로자성 인정 → 가입 유지(정상). 대표의 근로자성 인정은 예외적이므로 고정보수·지휘감독 실태 근거 필요`,
@@ -375,7 +375,7 @@ function applyWorkerNature(pos, status, jr){
   // unknown(기본): 잠정판정 보존 + 헤드라인 '검토필요'로 하향
   return {j:'검토필요',
    reason:jr.reason+`\n   ⚠ ${pos}는 직위만으로 적용제외 단정 불가 — 대표권·업무집행권 부존재 및 사용종속관계(상근·지휘감독·고정보수) 확인 전제. 근로자성 부인 시 "${jr.j}", 인정 시 "정상"`,
-   confirm:(jr.confirm?jr.confirm+'\n':'')+`[근로자성 확인] ${pos} 적용제외는 근로자성 부인 시에만 성립(고용보험법 §2①1·근기법 §2①1·대법 2003다5061). 비상근·무보수·위임계약·경영의사결정 참여 여부 확인 후 확정(확정 시 worker_status 입력).`};
+   confirm:(jr.confirm?jr.confirm+'\n':'')+`[근로자성 확인] ${pos} 적용제외는 근로자성 부인 시에만 성립(고용보험법 §2①1·근기법 §2①1·대법 2002다64681). 비상근·무보수·위임계약·경영의사결정 참여 여부 확인 후 확정(확정 시 worker_status 입력).`};
  }
  return jr; // 사외이사(이미 검토필요)·비액션 판정·기타 → 그대로
 }
@@ -496,7 +496,7 @@ export function formatDirectorResult(res){
  const cnt = {};
  res.results.forEach(r=>cnt[r.judgment]=(cnt[r.judgment]||0)+1);
  lines.push(`요약: ` + Object.entries(cnt).map(([k,v])=>`${k} ${v}건`).join(' / '));
- lines.push(`판정강도: 대표이사·이사장=적용제외 원칙 / 사내이사·이사·감사=근로자성 확인 전제(기본 '검토필요', 비상근·무보수 등 확정 시 worker_status 입력으로 취득취소/정상 전환)`);
+ lines.push(`판정강도: 대표이사·이사장·조합장=적용제외 원칙 / 사내이사·이사·감사=근로자성 확인 전제(기본 '검토필요', 비상근·무보수 등 확정 시 worker_status 입력으로 취득취소/정상 전환)`);
  const _stLabel = {non_worker:'근로자성 부인(확정)', worker:'근로자성 인정(확정)'};
  res.results.forEach((r,i)=>{
   const stTag = _stLabel[r.workerStatus] ? ` [근로자성: ${_stLabel[r.workerStatus]}]` : '';
@@ -507,7 +507,7 @@ export function formatDirectorResult(res){
   if(r.confirm) lines.push(`   확인필요: ${r.confirm.replace(/\n/g,'\n         ')}`);
  });
  lines.push(`\n※ 본 판정은 체크리스트·등기부 크로스체크 기반 참고 자료입니다. 최종 판단은 담당 노무사·관할 근로복지공단이 확인합니다.`);
- lines.push(`※ 등기임원 적용제외는 직위가 아니라 근로자성 부인(대표권·업무집행권 부존재, 사용종속관계 부인)으로 성립합니다(대법 2003다5061).`);
+ lines.push(`※ 등기임원 적용제외는 직위가 아니라 근로자성 부인(대표권·업무집행권 부존재, 사용종속관계 부인)으로 성립합니다(대법 2002다64681).`);
  lines.push(`※ 국민연금·건강보험은 본 도구 범위 밖 — 특히 무보수 대표이사의 국민연금·건강보험 적용제외(사업장가입자 제외)는 별도 판단이 필요합니다.`);
  return lines.join('\n');
 }
@@ -667,9 +667,9 @@ export function formatNonregResult(res){
 // (MCP 이식 시 대표이사 이름 정규식을 영문·혼용 허용으로 broaden)
 // =====================================================================
 function parseCeoHistory(text){
- const ceoRe = /^(?:대표이사|이사장)\s+([가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?)\s+(\d{6})\s*-?\s*\*+\s*(.*)$/;
+ const ceoRe = /^(?:대표이사|이사장|조합장)\s+([가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?)\s+(\d{6})\s*-?\s*\*+\s*(.*)$/;
  // anyPosRe: 영문명 임원도 차단해 대표이사 블록에 다른 직위 이벤트가 섞이는 것 방지(원본 HTML 대비 개선)
- const anyPosRe = /^(이사장|대표이사|사내이사|사외이사|감사|이사)\s+[가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?\s+\d{6}/;
+ const anyPosRe = /^(이사장|조합장|대표이사|상임이사|상임감사|사내이사|사외이사|감사|이사)\s+[가-힣A-Za-z]{2,}[가-힣A-Za-z. ]*?\s+\d{6}/;
  const dateRe = /(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(취임|중임|퇴임|사임|해임|사망|임기만료|주소변경)/g;
  const lines = text.split('\n');
  const blocks = []; let cur = null;
@@ -750,7 +750,7 @@ function detectCoCeo(periods){
 }
 
 function checkActiveCoCeo(officers){
- const activeCeos = officers.filter(o=>(o.pos==='대표이사'||o.pos==='이사장')&&o.active);
+ const activeCeos = officers.filter(o=>(o.pos==='대표이사'||o.pos==='이사장'||o.pos==='조합장')&&o.active);
  return {isActive:activeCeos.length>=2, count:activeCeos.length, names:activeCeos.map(c=>c.name)};
 }
 
